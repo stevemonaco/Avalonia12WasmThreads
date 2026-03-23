@@ -1,13 +1,36 @@
-<UserControl xmlns="https://github.com/avaloniaui"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             x:Class="Avalonia12WasmThreads.Views.MainView">
-  <Grid RowDefinitions="Auto,*,Auto">
-    <StackPanel Orientation="Horizontal" Margin="10" Spacing="10">
-      <Button x:Name="RunBtn" Content="Run State Machine" Click="OnRun"/>
-      <TextBlock x:Name="Status" VerticalAlignment="Center"/>
-    </StackPanel>
-    <Canvas x:Name="Arena" Grid.Row="1" Background="#1a1a2e"/>
-    <TextBlock x:Name="Log" Grid.Row="2" Margin="10" FontSize="11"
-               MaxHeight="80" Foreground="Gray"/>
-  </Grid>
+<UserControl
+    x:Class="Avalonia12WasmThreads.Views.MainView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid RowDefinitions="Auto,*,Auto">
+        <StackPanel
+            Margin="10"
+            Orientation="Horizontal"
+            Spacing="10">
+            <Button
+                Click="OnRun"
+                Content="Run State Machine"
+                x:Name="RunBtn" />
+            <TextBlock VerticalAlignment="Center" x:Name="Status" />
+        </StackPanel>
+        <Canvas
+            Background="#1a1a2e"
+            Grid.Row="1"
+            x:Name="Arena" />
+        <ScrollViewer
+            Grid.Row="2"
+            Margin="10"
+            MaxHeight="80">
+            <ItemsControl x:Name="logItems">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                        <TextBlock
+                            FontSize="11"
+                            Foreground="Gray"
+                            Text="{Binding .}" />
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+    </Grid>
 </UserControl>
