@@ -1,14 +1,21 @@
-﻿using System.Runtime.Versioning;
-using System.Threading.Tasks;
+﻿using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Browser;
 using Avalonia12WasmThreads;
 
 internal sealed partial class Program
 {
-    private static Task Main(string[] args) => BuildAvaloniaApp()
+    private static Task Main(string[] args)
+    {
+        var options = new BrowserPlatformOptions()
+        {
+            PreferManagedThreadDispatcher = false
+        };
+        
+        return BuildAvaloniaApp()
             .WithInterFont()
-            .StartBrowserAppAsync("out");
+            .StartBrowserAppAsync("out", options);
+    }
 
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<App>();

@@ -1,16 +1,13 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-             xmlns:vm="using:Avalonia12WasmThreads.ViewModels"
-             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
-             x:Class="Avalonia12WasmThreads.Views.MainView"
-             x:DataType="vm:MainViewModel">
-  <Design.DataContext>
-    <!-- This only sets the DataContext for the previewer in an IDE,
-         to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
-    <vm:MainViewModel />
-  </Design.DataContext>
-
-  <TextBlock Text="{Binding Greeting}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+             x:Class="Avalonia12WasmThreads.Views.MainView">
+  <Grid RowDefinitions="Auto,*,Auto">
+    <StackPanel Orientation="Horizontal" Margin="10" Spacing="10">
+      <Button x:Name="RunBtn" Content="Run State Machine" Click="OnRun"/>
+      <TextBlock x:Name="Status" VerticalAlignment="Center"/>
+    </StackPanel>
+    <Canvas x:Name="Arena" Grid.Row="1" Background="#1a1a2e"/>
+    <TextBlock x:Name="Log" Grid.Row="2" Margin="10" FontSize="11"
+               MaxHeight="80" Foreground="Gray"/>
+  </Grid>
 </UserControl>
