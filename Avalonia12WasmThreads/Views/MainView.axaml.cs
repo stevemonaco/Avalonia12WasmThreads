@@ -1,54 +1,27 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
-using Avalonia.Animation;
-using Avalonia.Animation.Easings;
 using Avalonia.Collections;
 using Avalonia.Controls;
-using Avalonia.Controls.Shapes;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Threading;
+using SkiaSharp;
 
 namespace Avalonia12WasmThreads.Views;
 
 public partial class MainView : UserControl
 {
-    private readonly Rectangle[] _squares;
-    private readonly Random _rng = new();
     private CancellationTokenSource? _cts;
-    private AvaloniaList<string> _log = new();
-    private int _cycle;
+    private readonly AvaloniaList<string> _log = new();
 
     public MainView()
     {
         InitializeComponent();
-
         logItems.ItemsSource = _log;
-        
-        IBrush[] _palette =
-        [
-            Brushes.Coral, Brushes.DodgerBlue, Brushes.MediumSeaGreen, Brushes.Gold, Brushes.Orchid,
-            Brushes.Tomato, Brushes.SteelBlue, Brushes.LimeGreen, Brushes.Orange, Brushes.HotPink
-        ];
-
-        _squares = new Rectangle[10];
-        
-        for (int i = 0; i < _squares.Length; i++)
-        {
-            _squares[i] = new Rectangle
-            {
-                Width = 60,
-                Height = 60,
-                Fill = _palette[i % _palette.Length]
-            };
-            
-            Canvas.SetLeft(_squares[i], 80 * i + 20);
-            Canvas.SetTop(_squares[i], 20);
-            Arena.Children.Add(_squares[i]);
-        }
     }
 
     private async void OnRun(object? s, Avalonia.Interactivity.RoutedEventArgs e)
@@ -57,184 +30,225 @@ public partial class MainView : UserControl
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
 
-        // Spin up several background threads that continuously allocate memory,
-        // forcing WebAssembly.Memory.grow() which invalidates TypedArray views
-        // on all threads — including the one SkiaSharp is rendering on.
-        var allocators = new Task[4];
-        for (int t = 0; t < allocators.Length; t++)
+        AppendLog("Starting SkiaSharp handle contention test...");
+        AppendLog("Background threads will create/dispose SkiaSharp objects");
+        AppendLog("while the render thread accesses SKSurface.Canvas.");
+
+        // Launch background threads that churn SkiaSharp handles.
+        // This creates contention on HandleDictionary's ReaderWriterLockSlim —
+        // the same lock the render thread needs when it calls SKSurface.get_Canvas().
+        var workers = new Task[6];
+        for (int i = 0; i < workers.Length; i++)
         {
-            int threadId = t;
-            allocators[t] = Task.Run(() => MemoryPressureWorker(threadId, ct), ct);
+            int id = i;
+            workers[i] = Task.Run(() => SkiaHandleChurnWorker(id, ct), ct);
         }
 
-        // Also spin up background tasks that do concurrent dictionary/collection work
-        // to add more cross-thread contention
-        var bag = new ConcurrentBag<byte[]>();
-        var contention = Task.Run(() => CollectionContentionWorker(bag, ct), ct);
+        // Drive rendering hard by continuously invalidating a visual that
+        // uses RenderTargetBitmap (forces SkiaSharp surface/canvas creation on render thread)
+        var renderDriver = Task.Run(() => RenderInvalidationDriver(ct), ct);
 
-        for (_cycle = 0; _cycle < 20; _cycle++)
+        // Also add memory pressure to trigger WebAssembly.Memory.grow(),
+        // which invalidates ArrayBuffer views and compounds the issue
+        var memWorker = Task.Run(() => MemoryPressureWorker(ct), ct);
+
+        int cycle = 0;
+        try
         {
-            Status.Text = $"Cycle {_cycle}: animating + background allocs...";
+            while (!ct.IsCancellationRequested && cycle < 60)
+            {
+                Status.Text = $"Cycle {cycle}: contending on SkiaSharp handles...";
+                await Task.Delay(500, ct);
+                cycle++;
 
-            // Animate multiple squares simultaneously to keep SkiaSharp busy rendering
-            var animTasks = new List<Task>();
-            for (int i = 0; i < _squares.Length; i++)
-            {
-                var sq = _squares[i];
-                double targetX = _rng.Next(20, 500), targetY = _rng.Next(20, 300);
-                animTasks.Add(AnimateSquare(sq, targetX, targetY));
-            }
-
-            // Also kick off a few Task.Run jobs that allocate and return results,
-            // simulating real app patterns (deserializing API responses, etc.)
-            var bgResults = new Task<string>[3];
-            for (int j = 0; j < bgResults.Length; j++)
-            {
-                int jobId = j;
-                int cycle = _cycle;
-                bgResults[j] = Task.Run(() => BackgroundWorkWithAlloc(cycle, jobId), ct);
-            }
-
-            try
-            {
-                await Task.WhenAll(animTasks);
-                await Task.WhenAll(bgResults);
-                var results = string.Join(", ", Array.ConvertAll(bgResults, t => t.Result));
-                AppendLog($"Cycle {_cycle}: [{results}]");
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"Cycle {_cycle}: FAILED — {ex.Message}");
-            }
-
-            // Trigger GC to further stress the runtime while rendering
-            if (_cycle % 3 == 0)
-            {
-                _ = Task.Run(() =>
-                {
-                    GC.Collect(2, GCCollectionMode.Aggressive, true);
-                    GC.WaitForPendingFinalizers();
-                });
+                if (cycle % 5 == 0)
+                    AppendLog($"Cycle {cycle}: still running, {workers.Length} handle-churn threads active");
             }
         }
+        catch (OperationCanceledException) { }
 
         _cts.Cancel();
-        try { await Task.WhenAll(allocators); } catch (OperationCanceledException) { }
-        try { await contention; } catch (OperationCanceledException) { }
+        try { await Task.WhenAll(workers); } catch { }
+        try { await renderDriver; } catch { }
+        try { await memWorker; } catch { }
         _cts.Dispose();
         _cts = null;
 
-        Status.Text = "Done — all cycles complete.";
+        Status.Text = $"Done — completed {cycle} cycles without crash.";
+        AppendLog($"Test finished after {cycle} cycles.");
         RunBtn.IsEnabled = true;
     }
 
     /// <summary>
-    /// Continuously allocates and discards byte arrays on a background thread.
-    /// This forces WebAssembly.Memory.grow() calls which refresh TypedArray views.
+    /// Churns SkiaSharp object handles on a background thread.
+    /// Each create/dispose goes through HandleDictionary.GetOrAddObject / Remove,
+    /// which acquires the ReaderWriterLockSlim that the render thread also needs.
+    /// This directly reproduces the contention path:
+    ///   SKSurface.get_Canvas() → HandleDictionary.GetOrAddObject → RWLock
     /// </summary>
-    private void MemoryPressureWorker(int id, CancellationToken ct)
+    private void SkiaHandleChurnWorker(int id, CancellationToken ct)
     {
-        var rng = new Random(id * 31);
+        var rng = new Random(id * 37);
+        int ops = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                // Vary the operations to hit different HandleDictionary code paths
+                switch (rng.Next(5))
+                {
+                    case 0:
+                    {
+                        // SKBitmap → creates handle entry
+                        using var bmp = new SKBitmap(rng.Next(64, 512), rng.Next(64, 512));
+                        using var canvas = new SKCanvas(bmp);
+                        using var paint = new SKPaint { Color = new SKColor((byte)rng.Next(256), (byte)rng.Next(256), (byte)rng.Next(256)) };
+                        canvas.DrawRect(0, 0, bmp.Width, bmp.Height, paint);
+                        canvas.Flush();
+                        break;
+                    }
+                    case 1:
+                    {
+                        // SKSurface → same path as render thread (SKSurface.Canvas)
+                        var info = new SKImageInfo(rng.Next(100, 400), rng.Next(100, 400));
+                        using var surface = SKSurface.Create(info);
+                        if (surface != null)
+                        {
+                            var canvas = surface.Canvas; // This is the exact call that contends
+                            using var paint = new SKPaint { Color = SKColors.Red };
+                            canvas.DrawCircle(50, 50, 30, paint);
+                            canvas.Flush();
+                            using var snap = surface.Snapshot();
+                        }
+                        break;
+                    }
+                    case 2:
+                    {
+                        // Multiple small bitmaps — rapid handle create/destroy
+                        var bitmaps = new List<SKBitmap>();
+                        for (int j = 0; j < rng.Next(5, 20); j++)
+                        {
+                            bitmaps.Add(new SKBitmap(32, 32));
+                        }
+                        foreach (var b in bitmaps) b.Dispose();
+                        break;
+                    }
+                    case 3:
+                    {
+                        // SKImage from bitmap — crosses handle dictionary entries
+                        using var bmp = new SKBitmap(128, 128);
+                        using var canvas = new SKCanvas(bmp);
+                        using var paint = new SKPaint { Color = SKColors.Blue };
+                        canvas.Clear(SKColors.White);
+                        canvas.DrawRect(10, 10, 100, 100, paint);
+                        using var img = SKImage.FromBitmap(bmp);
+                        using var data = img.Encode(SKEncodedImageFormat.Png, 80);
+                        break;
+                    }
+                    case 4:
+                    {
+                        // SKPath + SKPaint churn
+                        using var path = new SKPath();
+                        path.MoveTo(0, 0);
+                        for (int p = 0; p < rng.Next(10, 50); p++)
+                            path.LineTo(rng.Next(200), rng.Next(200));
+                        path.Close();
+
+                        using var paint = new SKPaint
+                        {
+                            Style = SKPaintStyle.Stroke,
+                            StrokeWidth = rng.Next(1, 5),
+                            Color = SKColors.Green
+                        };
+
+                        using var bmp = new SKBitmap(200, 200);
+                        using var canvas = new SKCanvas(bmp);
+                        canvas.DrawPath(path, paint);
+                        break;
+                    }
+                }
+
+                ops++;
+            }
+            catch (Exception)
+            {
+                // Swallow — we expect crashes from contention
+            }
+
+            // Minimal yielding to maximize contention
+            if (rng.Next(20) == 0)
+                Thread.Sleep(0);
+        }
+    }
+
+    /// <summary>
+    /// Continuously invalidates the UI to force the render thread to call
+    /// SKSurface.get_Canvas() → HandleDictionary.GetOrAddObject → RWLock,
+    /// while background threads hold or contend on the same lock.
+    /// </summary>
+    private async Task RenderInvalidationDriver(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                // Post to UI thread to invalidate rendering
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    // Force a render by changing a visual property
+                    Arena.Background = new SolidColorBrush(
+                        Color.FromRgb(
+                            (byte)Random.Shared.Next(20, 40),
+                            (byte)Random.Shared.Next(20, 40),
+                            (byte)Random.Shared.Next(40, 60)));
+                    Arena.InvalidateVisual();
+                });
+
+                // Don't await too long — keep the render pipeline hot
+                await Task.Delay(8, ct); // ~120fps invalidation rate
+            }
+            catch (OperationCanceledException) { break; }
+            catch { }
+        }
+    }
+
+    /// <summary>
+    /// Allocates memory to trigger WebAssembly.Memory.grow() which invalidates
+    /// ArrayBuffer views on all threads, compounding the SkiaSharp handle issue.
+    /// </summary>
+    private void MemoryPressureWorker(CancellationToken ct)
+    {
+        var rng = new Random(99);
         var keepAlive = new List<byte[]>();
 
         while (!ct.IsCancellationRequested)
         {
-            // Allocate arrays of varying sizes — larger ones are more likely to trigger grow()
-            int size = rng.Next(1, 5) switch
+            int size = rng.Next(1, 4) switch
             {
-                1 => rng.Next(1024, 8192),             // small
-                2 => rng.Next(8192, 65536),             // medium
-                3 => rng.Next(65536, 524288),           // large
-                _ => rng.Next(524288, 2 * 1024 * 1024), // very large — likely triggers grow()
+                1 => rng.Next(4096, 65536),
+                2 => rng.Next(65536, 524288),
+                _ => rng.Next(524288, 2 * 1024 * 1024),
             };
 
             var buf = new byte[size];
-            // Touch the memory so it's not optimized away
-            buf[0] = (byte)id;
-            buf[size / 2] = 0xAB;
+            buf[0] = 0xAB;
             buf[size - 1] = 0xFF;
-
             keepAlive.Add(buf);
 
-            // Periodically discard to create GC pressure
-            if (keepAlive.Count > 50)
-            {
-                keepAlive.RemoveRange(0, 40);
-            }
+            if (keepAlive.Count > 30)
+                keepAlive.RemoveRange(0, 25);
 
-            // Small yield to not completely starve other threads but stay aggressive
             if (rng.Next(10) == 0)
                 Thread.Sleep(1);
         }
     }
 
-    /// <summary>
-    /// Adds cross-thread collection contention alongside memory pressure.
-    /// </summary>
-    private void CollectionContentionWorker(ConcurrentBag<byte[]> bag, CancellationToken ct)
-    {
-        var rng = new Random(42);
-        while (!ct.IsCancellationRequested)
-        {
-            // Add allocations to shared collection
-            bag.Add(new byte[rng.Next(4096, 32768)]);
-
-            // Drain periodically
-            if (bag.Count > 100)
-            {
-                while (bag.TryTake(out _)) { }
-            }
-
-            if (rng.Next(5) == 0)
-                Thread.Sleep(1);
-        }
-    }
-
-    /// <summary>
-    /// Simulates background work (like deserializing an API response) that allocates
-    /// memory and returns a result back to the UI thread.
-    /// </summary>
-    private string BackgroundWorkWithAlloc(int cycle, int jobId)
-    {
-        var rng = new Random(cycle * 100 + jobId);
-
-        // Simulate deserializing a large response — allocate strings and collections
-        var items = new List<string>();
-        for (int i = 0; i < rng.Next(100, 500); i++)
-        {
-            items.Add(new string((char)('A' + rng.Next(26)), rng.Next(50, 200)));
-        }
-
-        // Allocate a large-ish byte array (simulating image/binary data)
-        var payload = new byte[rng.Next(32768, 262144)];
-        rng.NextBytes(payload);
-
-        // Simulate some CPU work
-        int hash = 0;
-        for (int i = 0; i < payload.Length; i++)
-            hash = hash * 31 + payload[i];
-
-        //Thread.Sleep(rng.Next(10, 50));
-        return $"j{jobId}:{items.Count}items,h={hash & 0xFFFF:X4}";
-    }
-
-    private async Task AnimateSquare(Rectangle sq, double toX, double toY)
-    {
-        var dur = TimeSpan.FromMilliseconds(200 + _rng.Next(300));
-
-        var xAnim = new DoubleTransition { Property = Canvas.LeftProperty, Duration = dur, Easing = new CubicEaseInOut() };
-        var yAnim = new DoubleTransition { Property = Canvas.TopProperty, Duration = dur, Easing = new CubicEaseInOut() };
-
-        sq.Transitions = new Transitions { xAnim, yAnim };
-
-        Canvas.SetLeft(sq, toX);
-        Canvas.SetTop(sq, toY);
-
-        await Task.Delay(dur + TimeSpan.FromMilliseconds(50));
-    }
-
     private void AppendLog(string msg)
     {
-        _log.Insert(0, msg);
+        if (Dispatcher.UIThread.CheckAccess())
+            _log.Insert(0, msg);
+        else
+            Dispatcher.UIThread.Post(() => _log.Insert(0, msg));
     }
 }
