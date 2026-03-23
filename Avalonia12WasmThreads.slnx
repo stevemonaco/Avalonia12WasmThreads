@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Packages.props" />
+  </Folder>
+  <Project Path="Avalonia12WasmThreads.Android/Avalonia12WasmThreads.Android.csproj" />
+  <Project Path="Avalonia12WasmThreads.Browser/Avalonia12WasmThreads.Browser.csproj" />
+  <Project Path="Avalonia12WasmThreads.Desktop/Avalonia12WasmThreads.Desktop.csproj" />
+  <Project Path="Avalonia12WasmThreads.iOS/Avalonia12WasmThreads.iOS.csproj" />
+  <Project Path="Avalonia12WasmThreads/Avalonia12WasmThreads.csproj" />
+</Solution>
